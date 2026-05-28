@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/wifi-tui", "crates/bt-tui"]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "MIT"
+repository = "https://github.com/yofsh/net-tui"
+
+[workspace.dependencies]
+ratatui = "0.29"
+crossterm = "0.28"
+regex = "1"
+net-tui-core = { path = "crates/core" }

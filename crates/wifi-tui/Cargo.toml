@@ -1,0 +1,12 @@
+[package]
+name = "wifi-tui"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ratatui.workspace = true
+crossterm.workspace = true
+regex.workspace = true
+net-tui-core.workspace = true
