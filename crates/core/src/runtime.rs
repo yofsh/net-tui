@@ -17,9 +17,9 @@ pub trait TuiApp {
     fn handle_scroll_up(&mut self);
     fn handle_scroll_down(&mut self);
     /// Left mouse click. `row`/`col` are the cell coordinates of the click.
-    /// `term_height` is the total terminal height so the impl can detect a hotbar click
-    /// (`row == term_height - 1`).
-    fn handle_left_click(&mut self, row: u16, col: u16, term_height: u16);
+    /// `term_width`/`term_height` are the terminal dimensions so the impl can
+    /// locate the (possibly multi-row) hotbar at the bottom of the screen.
+    fn handle_left_click(&mut self, row: u16, col: u16, term_width: u16, term_height: u16);
     fn should_quit(&self) -> bool;
     /// Called once on a clean exit (after the loop quits).
     fn cleanup(&mut self) {}
@@ -57,8 +57,8 @@ fn run_loop<A: TuiApp>(terminal: &mut DefaultTerminal, app: &mut A) -> io::Resul
                         MouseEventKind::ScrollUp => app.handle_scroll_up(),
                         MouseEventKind::ScrollDown => app.handle_scroll_down(),
                         MouseEventKind::Down(MouseButton::Left) => {
-                            let height = terminal.size()?.height;
-                            app.handle_left_click(mouse.row, mouse.column, height);
+                            let size = terminal.size()?;
+                            app.handle_left_click(mouse.row, mouse.column, size.width, size.height);
                         }
                         _ => {}
                     },

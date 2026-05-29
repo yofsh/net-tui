@@ -1,8 +1,46 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use net_tui_core::filter;
-use net_tui_core::hotbar::find_clicked_item;
+use net_tui_core::hotbar::find_clicked_item_wrapped;
 
 use crate::app::{App, View};
+
+/// Single source of truth for the bottom hotkey bar: both the renderer and the
+/// click handler build from this, so labels and click targets never drift.
+pub fn list_hotkeys(app: &App) -> Vec<net_tui_core::hotbar::Hotkey<'static>> {
+    match &app.view {
+        View::List if app.filtering => vec![
+            ("Esc", "Cancel", false),
+            ("Enter", "Apply", false),
+            ("", "Type to filter...", false),
+        ],
+        View::List => {
+            // Connect & Trust keep a static label and only turn green when the
+            // selected device is already connected / trusted (the key still
+            // toggles the state). Pair keeps its action label.
+            let connected = app.selected_device().map(|d| d.connected).unwrap_or(false);
+            let trusted = app.selected_device().map(|d| d.trusted).unwrap_or(false);
+            let pair_label = app
+                .selected_device()
+                .map(|d| if d.paired { "Unpair" } else { "Pair" })
+                .unwrap_or("Pair");
+            vec![
+                ("c", "Connect", connected),
+                ("p", pair_label, false),
+                ("t", "Trust", trusted),
+                ("P", "Power", app.controller.powered),
+                ("s", "Scan", app.scanning),
+                ("d", "Discoverable", app.controller.discoverable),
+                ("i", "Info", false),
+                ("r", "Remove", false),
+                ("f", "Filter", false),
+                ("h", "Help", false),
+                ("q", "Quit", false),
+            ]
+        }
+        View::Detail => vec![("Esc", "Back", false), ("⏎", "Connect", false)],
+        View::Help => vec![("↑↓", "Scroll", false), ("Esc", "Back", false)],
+    }
+}
 
 pub fn handle_key(app: &mut App, key: KeyEvent) {
     match &app.view {
@@ -29,7 +67,7 @@ fn handle_list(app: &mut App, key: KeyEvent) {
         KeyCode::Char('r') => app.remove_selected(),
         KeyCode::Char('s') => app.toggle_scan(),
         KeyCode::Char('P') => app.toggle_power(),
-        KeyCode::Char('D') => app.toggle_discoverable(),
+        KeyCode::Char('d') => app.toggle_discoverable(),
         KeyCode::Char('i') => {
             if app.selected_device().is_some() {
                 app.view = View::Detail;
@@ -52,30 +90,9 @@ fn handle_list(app: &mut App, key: KeyEvent) {
     }
 }
 
-pub fn handle_hotbar_click(app: &mut App, x: u16) {
-    let keys: Vec<&str> = match &app.view {
-        View::List if app.filtering => vec!["Esc", "Enter"],
-        View::List => vec!["c", "p", "t", "P", "s", "D", "i", "r", "f", "h", "q"],
-        View::Detail => vec!["Esc", "⏎"],
-        View::Help => vec!["↑↓", "Esc"],
-    };
-    let descs: Vec<&str> = match &app.view {
-        View::List if app.filtering => vec!["Cancel", "Apply"],
-        View::List => {
-            let cl = if app.selected_device().map(|d| d.connected).unwrap_or(false) { "Disconnect" } else { "Connect" };
-            let pl = if app.selected_device().map(|d| d.paired).unwrap_or(false) { "Unpair" } else { "Pair" };
-            let tl = if app.selected_device().map(|d| d.trusted).unwrap_or(false) { "Untrust" } else { "Trust" };
-            vec![cl, pl, tl, if app.controller.powered { "Power OFF" } else { "Power ON" },
-                 if app.scanning { "Scan OFF" } else { "Scan" },
-                 if app.controller.discoverable { "Hide" } else { "Discoverable" },
-                 "Detail", "Remove", "Filter", "Help", "Quit"]
-        }
-        View::Detail => vec!["Back", "Connect"],
-        View::Help => vec!["Scroll", "Back"],
-    };
-
-    let items: Vec<(&str, &str)> = keys.iter().copied().zip(descs.iter().copied()).collect();
-    if let Some(i) = find_clicked_item(&items, x) {
+pub fn handle_hotbar_click(app: &mut App, width: u16, line: u16, x: u16) {
+    let items = list_hotkeys(app);
+    if let Some(i) = find_clicked_item_wrapped(&items, width, line, x) {
         dispatch_hotbar(app, i);
     }
 }

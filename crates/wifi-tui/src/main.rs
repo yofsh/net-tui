@@ -9,8 +9,10 @@ use app::{SortMode, ViewMode};
 
 fn main() -> io::Result<()> {
     let mut sort = SortMode::Signal;
-    let mut view = ViewMode::Grouped;
-    let mut auto_scan = false;
+    // Flat (non-grouped) by default; `--view grouped` shows grouped on start.
+    let mut view = ViewMode::Flat;
+    // Continuous scan (rescan every ~2s) is on by default; --no-scan disables it.
+    let mut auto_scan = true;
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -42,23 +44,23 @@ fn main() -> io::Result<()> {
                     }
                 }
             }
-            "--auto" | "-a" => auto_scan = true,
+            "--no-scan" => auto_scan = false,
             "--help" | "-h" => {
                 println!("wifi-tui — WiFi network manager TUI");
                 println!();
                 println!("OPTIONS:");
                 println!("  -s, --sort <mode>    Sort: signal (default), name");
-                println!("  -v, --view <mode>    View: grouped (default), flat");
-                println!("  -a, --auto           Enable auto-scan (2s interval)");
+                println!("  -v, --view <mode>    View: flat (default), grouped");
+                println!("      --no-scan        Don't auto-scan on start (off by default)");
                 println!("  -h, --help           Show this help");
                 println!();
                 println!("KEYS:");
                 println!("  ↑↓/jk   Navigate         ⏎  Connect to selected");
-                println!("  s        Scan             S  Toggle auto-scan");
-                println!("  o        Cycle sort       v  Toggle view mode");
-                println!("  d        Detail overlay   D  Disconnect");
-                println!("  i        Connection info  h  Help overlay");
-                println!("  /        Filter by SSID   q  Quit");
+                println!("  s        Toggle scan      v  Toggle view mode");
+                println!("  o        Cycle sort       p  Power on/off");
+                println!("  i        Connection info  d  Disconnect");
+                println!("  /        Filter by SSID   h  Help overlay");
+                println!("  q        Quit");
                 return Ok(());
             }
             other => {

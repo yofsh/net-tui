@@ -1,8 +1,39 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use net_tui_core::filter;
-use net_tui_core::hotbar::find_clicked_item;
+use net_tui_core::hotbar::find_clicked_item_wrapped;
 
 use crate::app::{App, View};
+use crate::wifi;
+
+/// Single source of truth for the bottom hotkey bar: both the renderer and the
+/// click handler build from this, so labels and click targets never drift.
+pub fn list_hotkeys(app: &App) -> Vec<net_tui_core::hotbar::Hotkey<'static>> {
+    match &app.view {
+        View::List if app.filtering => vec![
+            ("Esc", "Cancel", false),
+            ("Enter", "Apply", false),
+            ("", "Type to filter...", false),
+        ],
+        View::List => vec![
+            ("c", "Connect", false),
+            ("p", "Power", wifi::is_wifi_on()),
+            ("s", "Scan", app.auto_scan),
+            ("t", "Toggle View", false),
+            ("i", "Info", false),
+            ("d", "Disconnect", false),
+            ("f", "Filter", false),
+            ("h", "Help", false),
+            ("q", "Quit", false),
+        ],
+        View::ConnInfo => vec![("Esc", "Back", false)],
+        View::Password => vec![
+            ("⏎", "Submit", false),
+            ("Tab", "Show/Hide", false),
+            ("Esc", "Cancel", false),
+        ],
+        View::Help => vec![("↑↓", "Scroll", false), ("Esc", "Back", false)],
+    }
+}
 
 pub fn handle_key(app: &mut App, key: KeyEvent) {
     match &app.view {
@@ -25,8 +56,7 @@ fn handle_list(app: &mut App, key: KeyEvent) {
         KeyCode::Home | KeyCode::Char('g') => app.select_first(),
         KeyCode::End | KeyCode::Char('G') => app.select_last(),
         KeyCode::Enter | KeyCode::Char('c') => app.connect_to_selected(),
-        KeyCode::Char('s') => app.scan(),
-        KeyCode::Char('a') | KeyCode::Char('S') => app.toggle_auto_scan(),
+        KeyCode::Char('s') => app.toggle_scan(),
         KeyCode::Char('i') => {
             if app.connection.is_some() {
                 app.view = View::ConnInfo;
@@ -53,22 +83,9 @@ fn handle_list(app: &mut App, key: KeyEvent) {
     }
 }
 
-pub fn handle_hotbar_click(app: &mut App, x: u16) {
-    let items: Vec<(&str, &str)> = match &app.view {
-        View::List if app.filtering => vec![("Esc", "Cancel"), ("Enter", "Apply"), ("", "Type to filter...")],
-        View::List => vec![
-            ("c", "Connect"),
-            ("p", "Power"), ("s", "Scan"), ("a", "Auto Scan"),
-            ("t", "Toggle View"),
-            ("i", "Info"), ("d", "Disconnect"),
-            ("f", "Filter"), ("h", "Help"), ("q", "Quit"),
-        ],
-        View::ConnInfo => vec![("Esc", "Back")],
-        View::Help => vec![("↑↓", "Scroll"), ("Esc", "Back")],
-        View::Password => vec![("⏎", "Submit"), ("Tab", "Show/Hide"), ("Esc", "Cancel")],
-    };
-
-    if let Some(i) = find_clicked_item(&items, x) {
+pub fn handle_hotbar_click(app: &mut App, width: u16, line: u16, x: u16) {
+    let items = list_hotkeys(app);
+    if let Some(i) = find_clicked_item_wrapped(&items, width, line, x) {
         dispatch_wifi_hotbar(app, i);
     }
 }
@@ -83,14 +100,13 @@ fn dispatch_wifi_hotbar(app: &mut App, index: usize) {
         View::List => match index {
             0 => app.connect_to_selected(),
             1 => app.toggle_power(),
-            2 => app.scan(),
-            3 => app.toggle_auto_scan(),
-            4 => app.toggle_view_mode(),
-            5 => { if app.connection.is_some() { app.view = View::ConnInfo; } }
-            6 => app.disconnect(),
-            7 => { app.filtering = true; app.filter.clear(); }
-            8 => { app.view = View::Help; }
-            9 => { app.should_quit = true; }
+            2 => app.toggle_scan(),
+            3 => app.toggle_view_mode(),
+            4 => { if app.connection.is_some() { app.view = View::ConnInfo; } }
+            5 => app.disconnect(),
+            6 => { app.filtering = true; app.filter.clear(); }
+            7 => { app.view = View::Help; }
+            8 => { app.should_quit = true; }
             _ => {}
         },
         View::ConnInfo => match index {

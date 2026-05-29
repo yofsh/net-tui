@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use net_tui_core::hotbar::hotkey_spans;
+use net_tui_core::hotbar::layout_hotkeys;
 use net_tui_core::overlay::{centered_rect, detail_row, draw_separator, truncate};
 use net_tui_core::theme::{CYAN, DIM, GRAY, GREEN, MAGENTA, RED, WHITE, YELLOW};
 
@@ -28,22 +28,30 @@ const COL_WIDTHS: [Constraint; 11] = [
 ];
 
 pub fn draw(f: &mut Frame, app: &mut App) {
+    let area = f.area();
+
+    // Wrap the hotkey bar onto as many rows as the width needs, then reserve
+    // exactly that many rows so every hotkey stays visible on a narrow window.
+    let hotkeys = crate::input::list_hotkeys(app);
+    let hotbar_lines = layout_hotkeys(&hotkeys, area.width);
+    let hotbar_rows = hotbar_lines.len() as u16;
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // status
-            Constraint::Length(1), // separator
-            Constraint::Min(3),   // table
-            Constraint::Length(1), // separator
-            Constraint::Length(1), // hotkeys
+            Constraint::Length(1),           // status
+            Constraint::Length(1),           // separator
+            Constraint::Min(3),              // table
+            Constraint::Length(1),           // separator
+            Constraint::Length(hotbar_rows), // hotkeys (1+ rows)
         ])
-        .split(f.area());
+        .split(area);
 
     draw_status_line(f, app, chunks[0]);
     draw_separator(f, chunks[1]);
     draw_network_table(f, app, chunks[2]);
     draw_separator(f, chunks[3]);
-    draw_hotkey_bar(f, app, chunks[4]);
+    f.render_widget(Paragraph::new(hotbar_lines), chunks[4]);
 
     match &app.view {
         View::ConnInfo => draw_conninfo_overlay(f, app),
@@ -56,165 +64,6 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 // ── Status line ─────────────────────────────────────────────────────────────
 
 fn draw_status_line(f: &mut Frame, app: &App, area: Rect) {
-    let mut spans = vec![Span::styled(
-        " WiFi ",
-        Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
-    )];
-
-    if let Some(ds) = &app.device_state {
-        match ds.state.as_str() {
-            "connected" => {
-                if let Some(conn) = &app.connection {
-                    let w = area.width as usize;
-                    // Always: SSID + signal + band/ch + gen
-                    spans.push(Span::styled(
-                        &conn.ssid,
-                        Style::default().fg(GREEN).add_modifier(Modifier::BOLD),
-                    ));
-                    spans.push(Span::raw("  "));
-                    if let Some(dbm) = conn.signal {
-                        let (bar, color) = signal_bar_str(dbm as f64);
-                        spans.push(Span::styled(bar, Style::default().fg(color)));
-                        spans.push(Span::styled(
-                            format!(" {dbm}dBm"),
-                            Style::default().fg(GRAY),
-                        ));
-                    }
-                    spans.push(Span::raw("  "));
-                    spans.push(Span::styled(&conn.band, Style::default().fg(CYAN)));
-                    if !conn.channel.is_empty() {
-                        spans.push(Span::styled(
-                            format!("/ch{}", conn.channel),
-                            Style::default().fg(GRAY),
-                        ));
-                    }
-                    spans.push(Span::raw("  "));
-                    spans.push(Span::styled(
-                        &conn.gen,
-                        Style::default().fg(gen_color(&conn.gen)),
-                    ));
-                    // ≥80: uptime
-                    if w >= 80 && conn.connected_time > 0 {
-                        spans.push(Span::raw("  "));
-                        spans.push(Span::styled(
-                            wifi::format_time(conn.connected_time),
-                            Style::default().fg(GRAY),
-                        ));
-                    }
-                    // ≥100: TX/RX rates
-                    if w >= 100 {
-                        spans.push(Span::raw("  "));
-                        spans.push(Span::styled(
-                            format!("↑{:.0}", conn.tx_bitrate),
-                            Style::default().fg(GREEN),
-                        ));
-                        spans.push(Span::styled(
-                            format!(" ↓{:.0} Mbps", conn.rx_bitrate),
-                            Style::default().fg(CYAN),
-                        ));
-                    }
-                    // ≥125: TX retries
-                    if w >= 125 {
-                        let (retry_str, retry_color) =
-                            wifi::format_retries(conn.tx_retries, conn.tx_packets);
-                        spans.push(Span::raw("  "));
-                        spans.push(Span::styled("retry:", Style::default().fg(GRAY)));
-                        spans.push(Span::styled(
-                            retry_str,
-                            Style::default().fg(match retry_color {
-                                "green" => GREEN,
-                                "yellow" => YELLOW,
-                                "red" => RED,
-                                _ => GRAY,
-                            }),
-                        ));
-                    }
-                    // ≥150: traffic totals
-                    if w >= 150 {
-                        spans.push(Span::raw("  "));
-                        spans.push(Span::styled(
-                            format!(
-                                "↑{} ↓{}",
-                                wifi::format_bytes(conn.tx_bytes),
-                                wifi::format_bytes(conn.rx_bytes)
-                            ),
-                            Style::default().fg(GRAY),
-                        ));
-                    }
-                    // ≥180: width + region
-                    if w >= 180 {
-                        if !conn.width.is_empty() {
-                            spans.push(Span::raw("  "));
-                            spans.push(Span::styled(
-                                &conn.width,
-                                Style::default().fg(GRAY),
-                            ));
-                        }
-                        if !conn.regdom.is_empty() {
-                            spans.push(Span::styled(
-                                format!(" {}", conn.regdom),
-                                Style::default().fg(GRAY),
-                            ));
-                        }
-                    }
-                } else {
-                    spans.push(Span::styled(
-                        &ds.connection,
-                        Style::default().fg(GREEN).add_modifier(Modifier::BOLD),
-                    ));
-                }
-            }
-            s if s.starts_with("connecting") => {
-                let phase = s
-                    .strip_prefix("connecting (")
-                    .and_then(|s| s.strip_suffix(')'))
-                    .unwrap_or("...");
-                spans.push(Span::styled("Connecting", Style::default().fg(YELLOW)));
-                spans.push(Span::styled(
-                    format!(" ({phase})"),
-                    Style::default().fg(GRAY),
-                ));
-                if !ds.connection.is_empty() && ds.connection != "--" {
-                    spans.push(Span::styled(
-                        format!("  {}", ds.connection),
-                        Style::default().fg(WHITE),
-                    ));
-                }
-            }
-            "disconnected" => {
-                spans.push(Span::styled("Disconnected", Style::default().fg(GRAY)));
-            }
-            "unavailable" => {
-                spans.push(Span::styled("WiFi OFF", Style::default().fg(RED)));
-            }
-            "deactivating" => {
-                spans.push(Span::styled(
-                    "Disconnecting...",
-                    Style::default().fg(YELLOW),
-                ));
-            }
-            other => {
-                spans.push(Span::styled(other, Style::default().fg(GRAY)));
-            }
-        }
-    } else {
-        spans.push(Span::styled("...", Style::default().fg(GRAY)));
-    }
-
-    if !app.network_label.is_empty() {
-        spans.push(Span::raw("  "));
-        spans.push(Span::styled(
-            format!("[{}]", app.network_label),
-            Style::default().fg(GRAY),
-        ));
-    }
-
-    if let Some(msg) = app.status.current() {
-        spans.push(Span::raw("  "));
-        spans.push(Span::styled(format!("[{msg}]"), Style::default().fg(YELLOW)));
-    }
-
-    // Right-side badges
     let badge = |label: &str, fg: Color, bg: Color| -> Vec<Span<'static>> {
         vec![
             Span::styled(
@@ -225,23 +74,206 @@ fn draw_status_line(f: &mut Frame, app: &App, area: Rect) {
         ]
     };
 
-    let mut right: Vec<Span> = Vec::new();
-
+    // Right-side status badges. Each carries a full label and a single-letter
+    // fallback; when the window is too narrow to fit the full labels alongside
+    // the left-hand content, we fold every badge down to just its letter (the
+    // colors still tell them apart).
+    let mut badges: Vec<(&str, &str, Color, Color)> = Vec::new();
     if let Some(ds) = &app.device_state {
         match ds.state.as_str() {
-            "connected" => right.extend(badge("Connected", Color::Black, GREEN)),
-            "disconnected" => right.extend(badge("Disconnected", WHITE, Color::Rgb(80, 80, 80))),
-            "unavailable" => right.extend(badge("Off", WHITE, RED)),
-            s if s.starts_with("connecting") => right.extend(badge("Connecting", Color::Black, YELLOW)),
+            "connected" => badges.push(("Connected", "C", Color::Black, GREEN)),
+            "disconnected" => badges.push(("Disconnected", "D", WHITE, Color::Rgb(80, 80, 80))),
+            "unavailable" => badges.push(("Off", "O", WHITE, RED)),
+            s if s.starts_with("connecting") => {
+                badges.push(("Connecting", "C", Color::Black, YELLOW))
+            }
             _ => {}
         }
     }
     if app.scanning || app.auto_scan {
-        right.extend(badge("Scanning", Color::Black, CYAN));
+        badges.push(("Scanning", "S", Color::Black, CYAN));
     }
 
-    let left_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    // " {label} " (label+2) plus a trailing space (1) per badge.
+    let badge_w = |label: &str| label.chars().count() + 3;
+    let full_w: usize = badges.iter().map(|(full, ..)| badge_w(full)).sum();
+    // Fold to letters when the full badges would leave too little room for the
+    // left-hand content (≈ " WiFi " + a readable name).
+    const RESERVE: usize = 18;
+    let fold = full_w + RESERVE > area.width as usize;
+
+    let mut right: Vec<Span> = Vec::new();
+    for (full, short, fg, bg) in &badges {
+        let label = if fold { *short } else { *full };
+        right.extend(badge(label, *fg, *bg));
+    }
     let right_width: usize = right.iter().map(|s| s.content.chars().count()).sum();
+
+    // Maximum width the left-hand content may occupy without pushing the
+    // right-side badges off screen. Every field below is added only if it still
+    // fits within this budget, so widgets drop off one by one (region, traffic,
+    // …, gen, the [networks] label) on a narrow window instead of overrunning
+    // the badges.
+    let max = (area.width as usize).saturating_sub(right_width);
+
+    let mut spans = vec![Span::styled(
+        " WiFi ",
+        Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
+    )];
+    let mut used = span_width(&spans);
+
+    if let Some(ds) = &app.device_state {
+        match ds.state.as_str() {
+            "connected" => {
+                if let Some(conn) = &app.connection {
+                    // SSID headline — always shown, truncated to remaining room.
+                    let ssid = truncate(&conn.ssid, max.saturating_sub(used).max(1));
+                    used += ssid.chars().count();
+                    spans.push(Span::styled(
+                        ssid,
+                        Style::default().fg(GREEN).add_modifier(Modifier::BOLD),
+                    ));
+
+                    if let Some(dbm) = conn.signal {
+                        let (bar, color) = signal_bar_str(dbm as f64);
+                        try_push(&mut spans, &mut used, max, vec![
+                            Span::raw("  "),
+                            Span::styled(bar, Style::default().fg(color)),
+                            Span::styled(format!(" {dbm}dBm"), Style::default().fg(GRAY)),
+                        ]);
+                    }
+
+                    let mut band = vec![
+                        Span::raw("  "),
+                        Span::styled(conn.band.as_str(), Style::default().fg(CYAN)),
+                    ];
+                    if !conn.channel.is_empty() {
+                        band.push(Span::styled(
+                            format!("/ch{}", conn.channel),
+                            Style::default().fg(GRAY),
+                        ));
+                    }
+                    try_push(&mut spans, &mut used, max, band);
+
+                    try_push(&mut spans, &mut used, max, vec![
+                        Span::raw("  "),
+                        Span::styled(conn.gen.as_str(), Style::default().fg(gen_color(&conn.gen))),
+                    ]);
+
+                    if conn.connected_time > 0 {
+                        try_push(&mut spans, &mut used, max, vec![
+                            Span::raw("  "),
+                            Span::styled(
+                                wifi::format_time(conn.connected_time),
+                                Style::default().fg(GRAY),
+                            ),
+                        ]);
+                    }
+
+                    try_push(&mut spans, &mut used, max, vec![
+                        Span::raw("  "),
+                        Span::styled(format!("↑{:.0}", conn.tx_bitrate), Style::default().fg(GREEN)),
+                        Span::styled(
+                            format!(" ↓{:.0} Mbps", conn.rx_bitrate),
+                            Style::default().fg(CYAN),
+                        ),
+                    ]);
+
+                    let (retry_str, retry_color) =
+                        wifi::format_retries(conn.tx_retries, conn.tx_packets);
+                    try_push(&mut spans, &mut used, max, vec![
+                        Span::raw("  "),
+                        Span::styled("retry:", Style::default().fg(GRAY)),
+                        Span::styled(
+                            retry_str,
+                            Style::default().fg(match retry_color {
+                                "green" => GREEN,
+                                "yellow" => YELLOW,
+                                "red" => RED,
+                                _ => GRAY,
+                            }),
+                        ),
+                    ]);
+
+                    try_push(&mut spans, &mut used, max, vec![
+                        Span::raw("  "),
+                        Span::styled(
+                            format!(
+                                "↑{} ↓{}",
+                                wifi::format_bytes(conn.tx_bytes),
+                                wifi::format_bytes(conn.rx_bytes)
+                            ),
+                            Style::default().fg(GRAY),
+                        ),
+                    ]);
+
+                    let mut wr = Vec::new();
+                    if !conn.width.is_empty() {
+                        wr.push(Span::raw("  "));
+                        wr.push(Span::styled(conn.width.as_str(), Style::default().fg(GRAY)));
+                    }
+                    if !conn.regdom.is_empty() {
+                        wr.push(Span::styled(format!(" {}", conn.regdom), Style::default().fg(GRAY)));
+                    }
+                    if !wr.is_empty() {
+                        try_push(&mut spans, &mut used, max, wr);
+                    }
+                } else {
+                    let label = truncate(&ds.connection, max.saturating_sub(used).max(1));
+                    spans.push(Span::styled(
+                        label,
+                        Style::default().fg(GREEN).add_modifier(Modifier::BOLD),
+                    ));
+                }
+            }
+            s if s.starts_with("connecting") => {
+                let phase = s
+                    .strip_prefix("connecting (")
+                    .and_then(|s| s.strip_suffix(')'))
+                    .unwrap_or("...");
+                spans.push(Span::styled("Connecting", Style::default().fg(YELLOW)));
+                spans.push(Span::styled(format!(" ({phase})"), Style::default().fg(GRAY)));
+                used = span_width(&spans);
+                if !ds.connection.is_empty() && ds.connection != "--" {
+                    try_push(&mut spans, &mut used, max, vec![Span::styled(
+                        format!("  {}", ds.connection),
+                        Style::default().fg(WHITE),
+                    )]);
+                }
+            }
+            "disconnected" => {
+                spans.push(Span::styled("Disconnected", Style::default().fg(GRAY)));
+            }
+            "unavailable" => {
+                spans.push(Span::styled("WiFi OFF", Style::default().fg(RED)));
+            }
+            "deactivating" => {
+                spans.push(Span::styled("Disconnecting...", Style::default().fg(YELLOW)));
+            }
+            other => {
+                spans.push(Span::styled(other, Style::default().fg(GRAY)));
+            }
+        }
+    } else {
+        spans.push(Span::styled("...", Style::default().fg(GRAY)));
+    }
+
+    // Trailing extras: drop them too if the window is too narrow.
+    used = span_width(&spans);
+    if !app.network_label.is_empty() {
+        try_push(&mut spans, &mut used, max, vec![
+            Span::raw("  "),
+            Span::styled(format!("[{}]", app.network_label), Style::default().fg(GRAY)),
+        ]);
+    }
+    if let Some(msg) = app.status.current() {
+        try_push(&mut spans, &mut used, max, vec![
+            Span::raw("  "),
+            Span::styled(format!("[{msg}]"), Style::default().fg(YELLOW)),
+        ]);
+    }
+
+    let left_width = span_width(&spans);
     let pad = (area.width as usize).saturating_sub(left_width + right_width);
     spans.push(Span::raw(" ".repeat(pad)));
     spans.extend(right);
@@ -558,42 +590,6 @@ fn draw_network_table(f: &mut Frame, app: &mut App, area: Rect) {
     f.render_stateful_widget(table, area, &mut app.table_state);
 }
 
-// ── Hotkey bar ──────────────────────────────────────────────────────────────
-
-fn draw_hotkey_bar(f: &mut Frame, app: &App, area: Rect) {
-    let auto_label = if app.auto_scan { "Auto Scan OFF" } else { "Auto Scan" };
-
-    let hotkeys: Vec<(&str, &str)> = match &app.view {
-        View::List if app.filtering => vec![
-            ("Esc", "Cancel"),
-            ("Enter", "Apply"),
-            ("", "Type to filter..."),
-        ],
-        View::List => vec![
-            ("c", "Connect"),
-            ("p", if wifi::is_wifi_on() { "Power OFF" } else { "Power ON" }),
-            ("s", "Scan"),
-            ("a", auto_label),
-            ("t", "Toggle View"),
-            ("i", "Info"),
-            ("d", "Disconnect"),
-            ("f", "Filter"),
-            ("h", "Help"),
-            ("q", "Quit"),
-        ],
-        View::ConnInfo => vec![("Esc", "Back")],
-        View::Password => vec![("⏎", "Submit"), ("Tab", "Show/Hide"), ("Esc", "Cancel")],
-        View::Help => vec![("↑↓", "Scroll"), ("Esc", "Back")],
-    };
-
-    let spans: Vec<Span> = hotkeys
-        .iter()
-        .flat_map(|(key, desc)| hotkey_spans(key, desc))
-        .collect();
-
-    f.render_widget(Paragraph::new(Line::from(spans)), area);
-}
-
 // ── Connection info overlay ──────────────────────────────────────────────────
 
 fn draw_conninfo_overlay(f: &mut Frame, app: &App) {
@@ -745,7 +741,7 @@ fn draw_password_overlay(f: &mut Frame, app: &App) {
         Line::from(""),
     ];
 
-    let title = format!(" Connect to \"{ssid}\" ");
+    let title = format!(" Connect to \"{}\" ", ssid);
     let border_block = ratatui::widgets::Block::default()
         .title(title)
         .borders(ratatui::widgets::Borders::ALL)
@@ -774,9 +770,8 @@ fn draw_help_overlay(f: &mut Frame, app: &App) {
         Line::from(vec![Span::styled("  g / G       ", b), Span::styled("Jump to first / last", d)]),
         Line::from(vec![Span::styled("  ⏎ / c       ", b), Span::styled("Connect to selected network", d)]),
         Line::from(vec![Span::styled("  D           ", b), Span::styled("Disconnect from current network", d)]),
-        Line::from(vec![Span::styled("  s           ", b), Span::styled("Trigger a Wi-Fi scan", d)]),
-        Line::from(vec![Span::styled("  P           ", b), Span::styled("Toggle WiFi radio on/off", d)]),
-        Line::from(vec![Span::styled("  S           ", b), Span::styled("Toggle auto-scan (rescan every 2s)", d)]),
+        Line::from(vec![Span::styled("  s           ", b), Span::styled("Toggle scanning (rescan every 2s while on)", d)]),
+        Line::from(vec![Span::styled("  p           ", b), Span::styled("Toggle WiFi radio on/off", d)]),
         Line::from(vec![Span::styled("  o           ", b), Span::styled("Cycle sort mode (signal / name)", d)]),
         Line::from(vec![Span::styled("  v           ", b), Span::styled("Toggle view (grouped BSSIDs / flat SSIDs)", d)]),
         Line::from(vec![Span::styled("  d           ", b), Span::styled("Detail overlay for selected AP", d)]),
@@ -850,6 +845,21 @@ fn draw_help_overlay(f: &mut Frame, app: &App) {
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
+
+/// Rendered width (in columns) of a run of spans.
+fn span_width(spans: &[Span]) -> usize {
+    spans.iter().map(|s| s.content.chars().count()).sum()
+}
+
+/// Append `chunk` to `spans` only if it still fits within `max`, updating the
+/// running `used` width. Lets the status line shed widgets on a narrow window.
+fn try_push<'a>(spans: &mut Vec<Span<'a>>, used: &mut usize, max: usize, chunk: Vec<Span<'a>>) {
+    let w = span_width(&chunk);
+    if *used + w <= max {
+        *used += w;
+        spans.extend(chunk);
+    }
+}
 
 fn signal_bar_str(dbm: f64) -> (String, Color) {
     if dbm >= -50.0 {

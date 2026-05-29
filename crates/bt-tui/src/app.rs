@@ -347,9 +347,12 @@ impl TuiApp for App {
         self.select_next();
     }
 
-    fn handle_left_click(&mut self, row: u16, col: u16, term_height: u16) {
-        if row == term_height.saturating_sub(1) {
-            crate::input::handle_hotbar_click(self, col);
+    fn handle_left_click(&mut self, row: u16, col: u16, term_width: u16, term_height: u16) {
+        let hotkeys = crate::input::list_hotkeys(self);
+        let hotbar_rows = net_tui_core::hotbar::rows_needed(&hotkeys, term_width);
+        let hotbar_top = term_height.saturating_sub(hotbar_rows);
+        if row >= hotbar_top {
+            crate::input::handle_hotbar_click(self, term_width, row - hotbar_top, col);
         } else if row >= 3 {
             let clicked = (row - 3) as usize;
             if clicked < self.filtered.len() {

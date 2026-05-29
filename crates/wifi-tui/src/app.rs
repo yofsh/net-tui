@@ -87,7 +87,6 @@ pub struct App {
     pub help_scroll: u16,
     refresh_counter: u32,
     auto_scan_counter: u32,
-    rescan_ticks: u32,
     bg_tx: mpsc::Sender<BgMsg>,
     bg_rx: mpsc::Receiver<BgMsg>,
 }
@@ -119,7 +118,6 @@ impl App {
             help_scroll: 0,
             refresh_counter: 0,
             auto_scan_counter: 0,
-            rescan_ticks: 0,
             bg_tx: tx,
             bg_rx: rx,
         };
@@ -128,34 +126,27 @@ impl App {
     }
 
     pub fn initial_load(&mut self) {
-        // Load synchronously so the first frame shows real data
+        // Quick, near-instant reads so the first frame has real device state.
+        // The network scan is slow, so it runs in the background instead of
+        // blocking the first render — the TUI shows immediately, then fills in.
         let state = wifi::get_device_state(&self.interface);
         if state.state == "connected" {
             self.connection = wifi::get_connection_info(&self.interface);
         }
         self.device_state = Some(state);
-
-        let networks = wifi::scan_networks(&self.interface);
-        let saved = wifi::saved_connections();
-        self.networks = networks;
-        self.saved = saved;
+        self.saved = wifi::saved_connections();
         self.rebuild();
-        let groups = self.group_count();
-        let aps = self.network_count();
-        self.network_label = format!("{groups} networks, {aps} APs");
 
-        // Schedule a follow-up scan after ~2s so the NM rescan has time to populate
-        self.rescan_ticks = 8;
+        // Kick off the first scan right away without blocking the first frame.
+        self.scan();
     }
 
+    /// Spawn a background network scan. No-op if one is already in flight.
     pub fn scan(&mut self) {
         if self.scanning {
             return;
         }
         self.scanning = true;
-        if !self.auto_scan {
-            self.status.set("Scanning...");
-        }
         let tx = self.bg_tx.clone();
         let iface = self.interface.clone();
         thread::spawn(move || {
@@ -205,9 +196,18 @@ impl App {
         self.rebuild();
     }
 
-    pub fn toggle_auto_scan(&mut self) {
+    /// Toggle continuous scanning. When on, the tick loop rescans every ~2s and
+    /// the status line shows a "Scanning" badge. When off, the network list is
+    /// left as-is.
+    pub fn toggle_scan(&mut self) {
         self.auto_scan = !self.auto_scan;
         self.auto_scan_counter = 0;
+        if self.auto_scan {
+            self.status.set("Scan ON");
+            self.scan();
+        } else {
+            self.status.set("Scan OFF");
+        }
     }
 
     pub fn rebuild(&mut self) {
@@ -518,13 +518,6 @@ impl TuiApp for App {
             self.refresh_connection();
         }
 
-        if self.rescan_ticks > 0 {
-            self.rescan_ticks -= 1;
-            if self.rescan_ticks == 0 {
-                self.scan();
-            }
-        }
-
         if self.auto_scan {
             self.auto_scan_counter += 1;
             if self.auto_scan_counter >= 8 {
@@ -546,9 +539,12 @@ impl TuiApp for App {
         self.select_next();
     }
 
-    fn handle_left_click(&mut self, row: u16, col: u16, term_height: u16) {
-        if row == term_height.saturating_sub(1) {
-            crate::input::handle_hotbar_click(self, col);
+    fn handle_left_click(&mut self, row: u16, col: u16, term_width: u16, term_height: u16) {
+        let hotkeys = crate::input::list_hotkeys(self);
+        let hotbar_rows = net_tui_core::hotbar::rows_needed(&hotkeys, term_width);
+        let hotbar_top = term_height.saturating_sub(hotbar_rows);
+        if row >= hotbar_top {
+            crate::input::handle_hotbar_click(self, term_width, row - hotbar_top, col);
         } else if row >= 3 {
             let clicked = (row - 3) as usize;
             if clicked < self.display_rows.len()

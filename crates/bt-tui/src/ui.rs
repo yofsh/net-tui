@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use net_tui_core::hotbar::hotkey_spans;
+use net_tui_core::hotbar::layout_hotkeys;
 use net_tui_core::overlay::{centered_rect, detail_row, draw_separator, truncate};
 use net_tui_core::theme::{CYAN, GRAY, GREEN, MAGENTA, RED, WHITE, YELLOW};
 
@@ -33,19 +33,20 @@ fn compute_columns(app: &App, width: u16) -> Columns {
         .unwrap_or(6)
         .clamp(8, 40);
 
-    // fixed columns: icon(2) + status(10) = 12 always shown
+    // fixed columns: icon(2) + status flags(5) = 7 always shown (status sits
+    // just left of the name now)
     // progressive: name, type(12), address(18), signal(8), battery(7), transport(7)
-    // total at full: 2 + name + 12 + 18 + 10 + 8 + 7 + 7 = 64 + name
+    // total at full: 2 + 5 + name + 12 + 18 + 8 + 7 + 7 = 59 + name
     let avail = width.saturating_sub(4); // account for highlight symbol + margin
 
-    let show_transport = avail >= 64 + max_name;
-    let show_battery = avail >= 57 + max_name;
-    let show_signal = avail >= 50 + max_name;
-    let show_address = avail >= 42 + max_name;
-    let show_type = avail >= 24 + max_name;
+    let show_transport = avail >= 59 + max_name;
+    let show_battery = avail >= 52 + max_name;
+    let show_signal = avail >= 45 + max_name;
+    let show_address = avail >= 37 + max_name;
+    let show_type = avail >= 19 + max_name;
 
     // shrink name if still too tight
-    let fixed: u16 = 2 + 10
+    let fixed: u16 = 2 + 5
         + if show_type { 12 } else { 0 }
         + if show_address { 18 } else { 0 }
         + if show_signal { 8 } else { 0 }
@@ -55,11 +56,11 @@ fn compute_columns(app: &App, width: u16) -> Columns {
 
     let mut widths = vec![
         Constraint::Length(2),          // icon
+        Constraint::Length(5),          // status flags — always, left of name
         Constraint::Length(name_width), // name
     ];
     if show_type { widths.push(Constraint::Length(12)); }
     if show_address { widths.push(Constraint::Length(18)); }
-    widths.push(Constraint::Length(10)); // status — always
     if show_signal { widths.push(Constraint::Length(8)); }
     if show_battery { widths.push(Constraint::Length(7)); }
     if show_transport { widths.push(Constraint::Length(7)); }
@@ -68,22 +69,30 @@ fn compute_columns(app: &App, width: u16) -> Columns {
 }
 
 pub fn draw(f: &mut Frame, app: &mut App) {
+    let area = f.area();
+
+    // Wrap the hotkey bar onto as many rows as the width needs, then reserve
+    // exactly that many rows so every hotkey stays visible on a narrow window.
+    let hotkeys = crate::input::list_hotkeys(app);
+    let hotbar_lines = layout_hotkeys(&hotkeys, area.width);
+    let hotbar_rows = hotbar_lines.len() as u16;
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // status
-            Constraint::Length(1), // separator
-            Constraint::Min(3),   // table
-            Constraint::Length(1), // separator
-            Constraint::Length(1), // hotkeys
+            Constraint::Length(1),           // status
+            Constraint::Length(1),           // separator
+            Constraint::Min(3),              // table
+            Constraint::Length(1),           // separator
+            Constraint::Length(hotbar_rows), // hotkeys (1+ rows)
         ])
-        .split(f.area());
+        .split(area);
 
     draw_status_line(f, app, chunks[0]);
     draw_separator(f, chunks[1]);
     draw_device_table(f, app, chunks[2]);
     draw_separator(f, chunks[3]);
-    draw_hotkey_bar(f, app, chunks[4]);
+    f.render_widget(Paragraph::new(hotbar_lines), chunks[4]);
 
     match &app.view {
         View::Detail => draw_detail_overlay(f, app),
@@ -101,7 +110,7 @@ fn draw_status_line(f: &mut Frame, app: &App, area: Rect) {
     let ctrl = &app.controller;
     if ctrl.powered {
         left.push(Span::styled(
-            &ctrl.name,
+            ctrl.name.as_str(),
             Style::default().fg(GREEN).add_modifier(Modifier::BOLD),
         ));
         left.push(Span::raw("  "));
@@ -119,7 +128,7 @@ fn draw_status_line(f: &mut Frame, app: &App, area: Rect) {
                     Style::default(),
                 ));
                 left.push(Span::styled(
-                    &dev.name,
+                    dev.name.as_str(),
                     Style::default().fg(GREEN),
                 ));
                 if let Some(bat) = dev.battery {
@@ -142,7 +151,9 @@ fn draw_status_line(f: &mut Frame, app: &App, area: Rect) {
         ));
     }
 
-    // Build right-side badges
+    // Right-side status badges. Each has a full label and a single-letter
+    // fallback; fold to letters when the window is too narrow for both the
+    // badges and the left-hand content (the colors still tell them apart).
     let badge = |label: &str, fg: Color, bg: Color| -> Vec<Span<'static>> {
         vec![
             Span::styled(
@@ -153,30 +164,48 @@ fn draw_status_line(f: &mut Frame, app: &App, area: Rect) {
         ]
     };
 
-    let mut right: Vec<Span> = Vec::new();
+    let mut badges: Vec<(&str, &str, Color, Color)> = Vec::new();
     if ctrl.powered {
-        right.extend(badge("Powered", Color::Black, GREEN));
+        badges.push(("Powered", "P", Color::Black, GREEN));
     } else {
-        right.extend(badge("Off", WHITE, RED));
+        badges.push(("Off", "O", WHITE, RED));
     }
     if app.scanning {
-        right.extend(badge("Scanning", Color::Black, YELLOW));
+        badges.push(("Scanning", "S", Color::Black, YELLOW));
     }
     if ctrl.discoverable {
-        right.extend(badge("Discoverable", Color::Black, MAGENTA));
+        badges.push(("Discoverable", "D", Color::Black, MAGENTA));
     }
     if ctrl.pairable {
-        right.extend(badge("Pairable", Color::Black, Color::Rgb(180, 142, 255)));
+        badges.push(("Pairable", "p", Color::Black, Color::Rgb(180, 142, 255)));
     }
 
-    // Pad between left and right so badges sit at the right edge
-    let left_width: usize = left.iter().map(|s| s.content.chars().count()).sum();
-    let right_width: usize = right.iter().map(|s| s.content.chars().count()).sum();
-    let pad = (area.width as usize).saturating_sub(left_width + right_width);
-    left.push(Span::raw(" ".repeat(pad)));
-    left.extend(right);
+    // " {label} " (label+2) plus a trailing space (1) per badge.
+    let badge_w = |label: &str| label.chars().count() + 3;
+    let full_w: usize = badges.iter().map(|(full, ..)| badge_w(full)).sum();
+    // Fold to letters when the full badges would leave too little room for the
+    // left-hand content (≈ " BT " + a readable name).
+    const RESERVE: usize = 16;
+    let fold = full_w + RESERVE > area.width as usize;
 
-    f.render_widget(Paragraph::new(Line::from(left)), area);
+    let mut right: Vec<Span> = Vec::new();
+    for (full, short, fg, bg) in &badges {
+        let label = if fold { *short } else { *full };
+        right.extend(badge(label, *fg, *bg));
+    }
+    let right_width: usize = right.iter().map(|s| s.content.chars().count()).sum();
+
+    // Keep the badges glued to the right edge: clamp the left content so it
+    // never overruns them, then pad the gap.
+    let max_left = (area.width as usize).saturating_sub(right_width);
+    let left = clamp_spans(left, max_left);
+    let left_width: usize = left.iter().map(|s| s.content.chars().count()).sum();
+    let pad = (area.width as usize).saturating_sub(left_width + right_width);
+    let mut line = left;
+    line.push(Span::raw(" ".repeat(pad)));
+    line.extend(right);
+
+    f.render_widget(Paragraph::new(Line::from(line)), area);
 }
 
 fn draw_device_table(f: &mut Frame, app: &mut App, area: Rect) {
@@ -205,35 +234,26 @@ fn draw_device_table(f: &mut Frame, app: &mut App, area: Rect) {
                 Style::default().fg(GRAY)
             };
 
+            // Connected is shown by the first-column icon, so it's not repeated
+            // here. Paired → chain, Trusted → check; Blocked falls back to a
+            // letter. No separators between them.
             let mut status_spans = Vec::new();
-            if dev.connected {
-                status_spans.push(Span::styled("C", Style::default().fg(GREEN)));
-            }
             if dev.paired {
-                status_spans.push(Span::styled("P", Style::default().fg(CYAN)));
+                status_spans.push(Span::styled("🔗", Style::default().fg(CYAN)));
             }
             if dev.trusted {
-                status_spans.push(Span::styled("T", Style::default().fg(YELLOW)));
+                status_spans.push(Span::styled("✓", Style::default().fg(YELLOW)));
             }
             if dev.blocked {
                 status_spans.push(Span::styled("B", Style::default().fg(RED)));
             }
             if status_spans.is_empty() {
                 status_spans.push(Span::styled("─", Style::default().fg(GRAY)));
-            } else {
-                let len = status_spans.len();
-                let mut interspersed = Vec::with_capacity(len * 2 - 1);
-                for (i, s) in status_spans.into_iter().enumerate() {
-                    if i > 0 {
-                        interspersed.push(Span::styled(" ", Style::default()));
-                    }
-                    interspersed.push(s);
-                }
-                status_spans = interspersed;
             }
 
             let mut cells = vec![
                 Cell::from(icon),
+                Cell::from(Line::from(status_spans)),
                 Cell::from(Span::styled(truncate(&dev.name, name_width), name_style)),
             ];
             if cols.show_type {
@@ -245,9 +265,8 @@ fn draw_device_table(f: &mut Frame, app: &mut App, area: Rect) {
                 ])));
             }
             if cols.show_address {
-                cells.push(Cell::from(Span::styled(&dev.address, Style::default().fg(GRAY))));
+                cells.push(Cell::from(Span::styled(dev.address.as_str(), Style::default().fg(GRAY))));
             }
-            cells.push(Cell::from(Line::from(status_spans)));
             if cols.show_signal {
                 cells.push(match dev.rssi {
                     Some(rssi) => {
@@ -294,12 +313,12 @@ fn draw_device_table(f: &mut Frame, app: &mut App, area: Rect) {
     };
 
     let mut hdr_cells = vec![
-        Cell::from(""),
+        Cell::from(""),                                          // icon
+        Cell::from(Span::styled("", Style::default().fg(GRAY))), // status flags
         Cell::from(Span::styled("Device", Style::default().fg(GRAY))),
     ];
     if cols.show_type { hdr_cells.push(Cell::from(Span::styled("Type", Style::default().fg(GRAY)))); }
     if cols.show_address { hdr_cells.push(Cell::from(Span::styled("Address", Style::default().fg(GRAY)))); }
-    hdr_cells.push(Cell::from(Span::styled("Status", Style::default().fg(GRAY))));
     if cols.show_signal { hdr_cells.push(Cell::from(Span::styled("RSSI", Style::default().fg(GRAY)))); }
     if cols.show_battery { hdr_cells.push(Cell::from(Span::styled("Bat", Style::default().fg(GRAY)))); }
     if cols.show_transport {
@@ -307,12 +326,10 @@ fn draw_device_table(f: &mut Frame, app: &mut App, area: Rect) {
             format!("Trans{title_line}"),
             Style::default().fg(GRAY),
         )));
-    } else {
+    } else if !title_line.is_empty() {
         // put filter indicator on last visible column
-        if !title_line.is_empty() {
-            if let Some(last) = hdr_cells.last_mut() {
-                *last = Cell::from(Span::styled(title_line, Style::default().fg(GRAY)));
-            }
+        if let Some(last) = hdr_cells.last_mut() {
+            *last = Cell::from(Span::styled(title_line, Style::default().fg(GRAY)));
         }
     }
     let header = Row::new(hdr_cells).height(1);
@@ -327,57 +344,6 @@ fn draw_device_table(f: &mut Frame, app: &mut App, area: Rect) {
         .highlight_symbol("▸ ");
 
     f.render_stateful_widget(table, area, &mut app.table_state);
-}
-
-fn draw_hotkey_bar(f: &mut Frame, app: &App, area: Rect) {
-    let power_label = if app.controller.powered { "Power OFF" } else { "Power ON" };
-    let scan_label = if app.scanning { "Scan OFF" } else { "Scan" };
-    let disc_label = if app.controller.discoverable { "Hide" } else { "Discoverable" };
-
-    let hotkeys: Vec<(&str, &str)> = match &app.view {
-        View::List if app.filtering => vec![
-            ("Esc", "Cancel"),
-            ("Enter", "Apply"),
-            ("", "Type to filter..."),
-        ],
-        View::List => {
-            let connect_label = app
-                .selected_device()
-                .map(|d| if d.connected { "Disconnect" } else { "Connect" })
-                .unwrap_or("Connect");
-            let pair_label = app
-                .selected_device()
-                .map(|d| if d.paired { "Unpair" } else { "Pair" })
-                .unwrap_or("Pair");
-            let trust_label = app
-                .selected_device()
-                .map(|d| if d.trusted { "Untrust" } else { "Trust" })
-                .unwrap_or("Trust");
-
-            vec![
-                ("c", connect_label),
-                ("p", pair_label),
-                ("t", trust_label),
-                ("P", power_label),
-                ("s", scan_label),
-                ("D", disc_label),
-                ("i", "Detail"),
-                ("r", "Remove"),
-                ("f", "Filter"),
-                ("h", "Help"),
-                ("q", "Quit"),
-            ]
-        }
-        View::Detail => vec![("Esc", "Back"), ("⏎", "Connect")],
-        View::Help => vec![("↑↓", "Scroll"), ("Esc", "Back")],
-    };
-
-    let spans: Vec<Span> = hotkeys
-        .iter()
-        .flat_map(|(key, desc)| hotkey_spans(key, desc))
-        .collect();
-
-    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn draw_detail_overlay(f: &mut Frame, app: &App) {
@@ -514,17 +480,16 @@ fn draw_help_overlay(f: &mut Frame, app: &App) {
         Line::from(vec![Span::styled("  r           ", b), Span::styled("Remove device (unpair + forget)", d)]),
         Line::from(vec![Span::styled("  P           ", b), Span::styled("Toggle Bluetooth power on/off", d)]),
         Line::from(vec![Span::styled("  s           ", b), Span::styled("Toggle scan on/off (discover nearby devices)", d)]),
-        Line::from(vec![Span::styled("  D           ", b), Span::styled("Toggle discoverable (visible to other devices)", d)]),
-        Line::from(vec![Span::styled("  i           ", b), Span::styled("Detail overlay for selected device", d)]),
+        Line::from(vec![Span::styled("  d           ", b), Span::styled("Toggle discoverable (visible to other devices)", d)]),
+        Line::from(vec![Span::styled("  i           ", b), Span::styled("Info overlay for selected device", d)]),
         Line::from(vec![Span::styled("  /           ", b), Span::styled("Filter devices by name", d)]),
         Line::from(vec![Span::styled("  h           ", b), Span::styled("This help screen", d)]),
         Line::from(vec![Span::styled("  q / Ctrl+C  ", b), Span::styled("Quit", d)]),
         Line::from(""),
-        Line::from(Span::styled("  Status Column", h)),
+        Line::from(Span::styled("  Status Flags", h)),
         Line::from(""),
-        Line::from(vec![Span::styled("  C ", g), Span::styled("Connected — active link to this device", d)]),
-        Line::from(vec![Span::styled("  P ", Style::default().fg(CYAN)), Span::styled("Paired — keys exchanged, can reconnect without re-pairing", d)]),
-        Line::from(vec![Span::styled("  T ", y), Span::styled("Trusted — auto-connect allowed, no confirmation needed", d)]),
+        Line::from(vec![Span::styled("  🔗 ", Style::default().fg(CYAN)), Span::styled("Paired — keys exchanged, can reconnect without re-pairing", d)]),
+        Line::from(vec![Span::styled("  ✓ ", y), Span::styled("Trusted — auto-connect allowed, no confirmation needed", d)]),
         Line::from(vec![Span::styled("  B ", Style::default().fg(RED)), Span::styled("Blocked — device is rejected", d)]),
         Line::from(""),
         Line::from(Span::styled("  Device Icons", h)),
@@ -556,6 +521,28 @@ fn draw_help_overlay(f: &mut Frame, app: &App) {
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
+
+/// Trim a run of spans to at most `max` columns, truncating the span that
+/// straddles the boundary and dropping the rest.
+fn clamp_spans(spans: Vec<Span>, max: usize) -> Vec<Span> {
+    let mut out = Vec::new();
+    let mut used = 0usize;
+    for s in spans {
+        let w = s.content.chars().count();
+        if used + w <= max {
+            used += w;
+            out.push(s);
+        } else {
+            let room = max - used;
+            if room > 0 {
+                let truncated: String = s.content.chars().take(room).collect();
+                out.push(Span::styled(truncated, s.style));
+            }
+            break;
+        }
+    }
+    out
+}
 
 fn rssi_bar(rssi: i32) -> (String, Color) {
     if rssi >= -50 {

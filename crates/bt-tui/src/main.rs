@@ -14,9 +14,9 @@ fn main() -> io::Result<()> {
                 println!();
                 println!("KEYS:");
                 println!("  ↑↓/jk   Navigate         ⏎  Connect/disconnect");
-                println!("  s        Toggle scan       D  Toggle discoverable");
+                println!("  s        Toggle scan       d  Toggle discoverable");
                 println!("  p        Pair/unpair       t  Trust/untrust");
-                println!("  r        Remove device     i  Detail overlay");
+                println!("  r        Remove device     i  Info overlay");
                 println!("  /        Filter by name    h  Help");
                 println!("  q        Quit");
                 return Ok(());
